@@ -1,5 +1,5 @@
---------------------------
-<JOB_DESCRIPTION>
---------------------------
+### HERE IS THE JOB DESCRIPTION TO ANALYZE:
 
-Please format your output as Markdown (bullet list).
+---------------------------
+<JOB_DESCRIPTION>
+---------------------------

@@ -70,8 +70,8 @@ FINAL_RESUME_JSON_PATH = RESULTS_DIR / "final_resume.json"
 SIMILARITY_PATH = RESULTS_DIR / "similarity_score.md"
 
 # Prompt files
-STEP1_SYSTEM_PROMPT = PROMPTS_DIR / "system" / "extract_keywords.md"
-STEP2_SYSTEM_PROMPT = PROMPTS_DIR / "system" / "plan_keywords.md"
+STEP1_SYSTEM_PROMPT_ANALZE_JD = PROMPTS_DIR / "system" / "step1_jd_analysis.md"
+STEP2_SYSTEM_PROMPT = PROMPTS_DIR / "system" / "step2_keyword_mapping.md"
 TAILORING_PROMPT     = PROMPTS_DIR / "system" / "tailoring.md"
 STEP4_SYSTEM_PROMPT  = PROMPTS_DIR / "system" / "update_skills.md"
 
@@ -133,7 +133,7 @@ def cosine_similarity(vec1, vec2):
 # --------------------------------------------------
 def analyze_jd() -> str:
     job_description = read_text_file(JD_PATH)
-    step1_system = read_text_file(STEP1_SYSTEM_PROMPT)
+    step1_system = read_text_file(STEP1_SYSTEM_PROMPT_ANALZE_JD)
     step1_user_tpl = read_text_file(STEP1_USER_PROMPT)
     step1_user = step1_user_tpl.replace("<JOB_DESCRIPTION>", job_description)
 
@@ -228,21 +228,26 @@ def compute_similarity_score(final_resume: str) -> float:
     logger.debug(f"Similarity score: {score:.4f}")
     return score
 
-def create_report(ranked_keywords: str, tailoring_plan: str, final_resume: str, similarity_score: float) -> None:
+# def create_report(ranked_keywords: str, tailoring_plan: str, final_resume: str, similarity_score: float) -> None:
+def create_report(ranked_keywords: str) -> None:
     """
     Combine Steps 1, 2, 4, and the similarity score into one Markdown report.
     """
-    similarity_pct = round(similarity_score * 100, 2)
+    # similarity_pct = round(similarity_score * 100, 2)
     report_lines = [
         "# Step 1: Ranked Keywords\n\n",
         ranked_keywords + "\n\n",
-        "# Step 2: Tailoring Plan\n\n",
+
+    ]
+    
+    """
+            "# Step 2: Tailoring Plan\n\n",
         tailoring_plan + "\n\n",
         "# Step 4: Final Tailored Resume\n\n",
         final_resume + "\n\n",
         "# Step 5: Similarity Score\n\n",
         f"Cosine similarity (JD ↔ Tailored Resume): {similarity_score:.4f} (~{similarity_pct}%)\n"
-    ]
+    """
     REPORT_PATH.write_text("".join(report_lines), encoding="utf-8")
     logger.info(f"Report written to {REPORT_PATH}.")
 
@@ -342,6 +347,7 @@ def run_pipeline(company: str, position: str, jobid: str):
     # Step 1: Extract & rank keywords
     ranked_keywords = analyze_jd()
 
+    """
     # Step 2: Plan keyword insertion
     tailoring_plan = keyword_insertion_plan(ranked_keywords)
 
@@ -364,10 +370,11 @@ def run_pipeline(company: str, position: str, jobid: str):
 
     # Step 7: Generate DOCX files
     generate_docx_files(company, position, jobid)
-
+"""
+    create_report(ranked_keywords=ranked_keywords)
     # Finally, clear job_description.txt again
-    if JD_PATH.exists():
-        JD_PATH.write_text("", encoding="utf-8")
+    # if JD_PATH.exists():
+    #     JD_PATH.write_text("", encoding="utf-8")
 
     print("✅ All steps completed. See logs in 'logs/resume_tailoring.log' for details.")
 
