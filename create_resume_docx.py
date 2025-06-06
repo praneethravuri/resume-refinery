@@ -255,4 +255,4 @@ def generate_docx_from_json(resume_data: dict, output_path: str = "Praneeth_Ravu
     # 8) Save the Document
     # -----------------------------
     doc.save(output_path)
-    logger.info(f"✅ Document generated: {output_path}")
+    logger.info(f"Document generated: {output_path}")

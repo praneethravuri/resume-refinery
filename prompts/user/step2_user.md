@@ -10,11 +10,3 @@
 <RANKED_KEYWORDS>
 ---------------------------
 
-
-### Here is the job description:
-
----------------------------
-<JOB_DESCRIPTION>
----------------------------
-
-Please output your planning‐table as a Markdown table.

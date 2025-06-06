@@ -1,273 +1,166 @@
-# main.py
-
+from create_resume_docx import generate_docx_from_json
 import logging
 from logging.handlers import RotatingFileHandler
-import math
 import json
-import os
 import shutil
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from create_resume_docx import generate_docx_from_json as create_docx_from_json
+# Paths
+ROOT = Path(__file__).parent
+DATA = ROOT / "data"
+PROMPTS = ROOT / "prompts"
+RESUMES = ROOT / "resumes"
+RESULTS = ROOT / "results"
 
-# --------------------------------------------------
-# 1) Logging Configuration: write to logs/resume_tailoring.log
-# --------------------------------------------------
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
+# Input files
+JD_FILE = DATA / "job_description.txt"
+RESUME_FILE = DATA / "resume.txt"
+HEADER_FILE = DATA / "header_data.json"
 
-log_path = LOG_DIR / "resume_tailoring.log"
-if log_path.exists():
-    log_path.unlink()  # Delete previous log file on each run
+# Prompt templates
+SYS_P = PROMPTS / "system"
+USR_P = PROMPTS / "user"
+STEP1_SYS = SYS_P / "step1_jd_analysis.md"
+STEP2_SYS = SYS_P / "step2_keyword_mapping.md"
+STEP3_SYS = SYS_P / "step3_generating_points.md"
+STEP4_SYS = SYS_P / "step4_quantifying_metrics.md"
+STEP5_SYS = SYS_P / "step5_remove_filler_words.md"
+STEP6_SYS = SYS_P / "step6_resume_refinement.md"
+STEP7_SYS = SYS_P / "step7_convert_to_json.md"
 
-file_handler = RotatingFileHandler(
-    filename=log_path,
-    maxBytes=5 * 1024 * 1024,  # 5 MB
-    backupCount=3
-)
-file_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    "%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-file_handler.setFormatter(formatter)
+STEP1_USR = USR_P / "step1_user.md"
+STEP2_USR = USR_P / "step2_user.md"
+STEP3_USR = USR_P / "step3_user.md"
+STEP4_USR = USR_P / "step4_user.md"
+STEP5_USR = USR_P / "step5_user.md"
+STEP6_USR = USR_P / "step6_user.md"
+STEP7_USR = USR_P / "step7_user.md"
 
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)
-root_logger.addHandler(file_handler)
+# Configure logging
 
-# Also print WARNING+ messages to console
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.WARNING)
-console_handler.setFormatter(formatter)
-root_logger.addHandler(console_handler)
 
-logger = logging.getLogger(__name__)
+def setup_logging():
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "resume_tailoring.log"
+    if log_file.exists():
+        log_file.unlink()
+    handler = RotatingFileHandler(
+        log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s", "%Y-%m-%d %H:%M:%S")
+    handler.setFormatter(fmt)
+    handler.setLevel(logging.DEBUG)
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    return logging.getLogger(__name__)
 
-# --------------------------------------------------
-# 2) Configuration of folder paths
-# --------------------------------------------------
-ROOT_DIR = Path(__file__).parent
-DATA_DIR = ROOT_DIR / "data"
-PROMPTS_DIR = ROOT_DIR / "prompts"
-RESUMES_DIR = ROOT_DIR / "resumes"
-RESULTS_DIR = ROOT_DIR / "results"
 
-# Ensure necessary directories exist
-DATA_DIR.mkdir(exist_ok=True)
-PROMPTS_DIR.mkdir(exist_ok=True)
-RESUMES_DIR.mkdir(exist_ok=True)
+logger = setup_logging()
+client = None  # Initialized after loading env vars
 
-# File paths that will be cleared / recreated
-JD_PATH = DATA_DIR / "job_description.txt"
-RESUME_PATH = DATA_DIR / "resume.txt"
+# Helpers
 
-TAILORED_RESUME_PATH = RESULTS_DIR / "tailored_resume.md"
-REPORT_PATH = RESULTS_DIR / "report.md"
-FINAL_RESUME_JSON_PATH = RESULTS_DIR / "final_resume.json"
-SIMILARITY_PATH = RESULTS_DIR / "similarity_score.md"
 
-# Prompt files
-STEP1_SYSTEM_PROMPT_ANALZE_JD = PROMPTS_DIR / "system" / "step1_jd_analysis.md"
-STEP2_SYSTEM_PROMPT = PROMPTS_DIR / "system" / "step2_keyword_mapping.md"
-TAILORING_PROMPT     = PROMPTS_DIR / "system" / "tailoring.md"
-STEP4_SYSTEM_PROMPT  = PROMPTS_DIR / "system" / "update_skills.md"
+def load_text(path: Path) -> str:
+    if not path.exists():
+        logger.error(f"Missing file: {path}")
+        raise FileNotFoundError(path)
+    return path.read_text(encoding="utf-8")
 
-STEP1_USER_PROMPT    = PROMPTS_DIR / "user" / "step1_user.md"
-STEP2_USER_PROMPT    = PROMPTS_DIR / "user" / "step2_user.md"
-STEP3_USER_PROMPT    = PROMPTS_DIR / "user" / "step3_user.md"
-STEP4_USER_PROMPT    = PROMPTS_DIR / "user" / "step4_user.md"
-CONVERT_USER_PROMPT  = PROMPTS_DIR / "user" / "convert_user.md"
 
-# Header data path
-HEADER_DATA_PATH = DATA_DIR / "header_data.json"
-
-# --------------------------------------------------
-# 3) Helper: call OpenAI with logging and retries
-# --------------------------------------------------
-def call_openai_with_logging(messages, purpose, model="gpt-4o", temperature=0.3, max_tokens=4000):
-    """
-    Wraps an OpenAI Chat call, logs inputs/outputs, and returns the assistant's content.
-    """
-    logger.debug(f"[{purpose}] Sending {len(messages)} messages to OpenAI (model={model}, temp={temperature}).")
+def call_openai(messages: list, purpose: str) -> str:
+    logger.debug(f"[{purpose}] Sending {len(messages)} messages to OpenAI.")
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        result = response.choices[0].message.content.strip()
-        logger.debug(f"[{purpose}] Received response:\n{result[:200]}{'...' if len(result) > 200 else ''}")
-        return result
+        resp = client.chat.completions.create(
+            model="gpt-4o", messages=messages, temperature=0.3)
+        content = resp.choices[0].message.content.strip()
+        logger.debug(
+            f"[{purpose}] Received response: {content[:200]}{'...' if len(content) > 200 else ''}")
+        return content
     except Exception as e:
-        logger.error(f"[{purpose}] Error calling OpenAI: {e}", exc_info=True)
+        logger.error(f"[{purpose}] OpenAI call failed: {e}", exc_info=True)
         raise
 
-# --------------------------------------------------
-# 4) Helper: read text from a file
-# --------------------------------------------------
-def read_text_file(path: Path) -> str:
-    if not path.exists():
-        logger.error(f"Missing required file: {path}")
-        raise FileNotFoundError(f"File not found: {path}")
-    text = path.read_text(encoding="utf-8")
-    logger.debug(f"Read {len(text)} characters from {path}.")
-    return text
+# Pipeline steps
 
-# --------------------------------------------------
-# 5) Helper: compute cosine similarity of two embeddings
-# --------------------------------------------------
-def cosine_similarity(vec1, vec2):
-    dot = sum(a * b for a, b in zip(vec1, vec2))
-    mag1 = math.sqrt(sum(a * a for a in vec1))
-    mag2 = math.sqrt(sum(b * b for b in vec2))
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-    return dot / (mag1 * mag2)
 
-# --------------------------------------------------
-# 6) Step 1: Extract & rank keywords from JD
-# --------------------------------------------------
-def analyze_jd() -> str:
-    job_description = read_text_file(JD_PATH)
-    step1_system = read_text_file(STEP1_SYSTEM_PROMPT_ANALZE_JD)
-    step1_user_tpl = read_text_file(STEP1_USER_PROMPT)
-    step1_user = step1_user_tpl.replace("<JOB_DESCRIPTION>", job_description)
+def extract_keywords() -> str:
+    jd_text = load_text(JD_FILE)
+    sys_template = load_text(STEP1_SYS)
+    user_template = load_text(STEP1_USR).replace("<JOB_DESCRIPTION>", jd_text)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "extract_keywords")
 
-    ranked_keywords = call_openai_with_logging(
-        [
-            {"role": "system", "content": step1_system},
-            {"role": "user",   "content": step1_user  }
-        ],
-        purpose="step1_extract_keywords"
-    )
-    logger.info("Step 1 completed: ranked keywords obtained.")
-    return ranked_keywords
 
-# --------------------------------------------------
-# 7) Step 2: Plan keyword insertion into resume
-# --------------------------------------------------
-def keyword_insertion_plan(ranked_keywords: str) -> str:
-    resume_text = read_text_file(RESUME_PATH)
-    step2_system = read_text_file(STEP2_SYSTEM_PROMPT)
-    step2_user_tpl = read_text_file(STEP2_USER_PROMPT)
+def plan_keywords(keywords: str) -> str:
+    resume_text = load_text(RESUME_FILE)
+    sys_template = load_text(STEP2_SYS)
+    user_template = load_text(STEP2_USR).replace(
+        "<RESUME>", resume_text).replace("<RANKED_KEYWORDS>", keywords)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "plan_keywords")
 
-    step2_user = (
-        step2_user_tpl
-        .replace("<RESUME>", resume_text)
-        .replace("<RANKED_KEYWORDS>", ranked_keywords)
-    )
-    tailoring_plan = call_openai_with_logging(
-        [
-            {"role": "system", "content": step2_system},
-            {"role": "user",   "content": step2_user   }
-        ],
-        purpose="step2_plan_keywords"
-    )
-    logger.info("Step 2 completed: tailoring plan obtained.")
-    return tailoring_plan
 
-# --------------------------------------------------
-# 8) Step 3: Apply tailoring plan (intermediate)
-# --------------------------------------------------
-def apply_tailoring_plan(tailoring_plan: str) -> str:
-    resume_text = read_text_file(RESUME_PATH)
-    step3_user_tpl = read_text_file(STEP3_USER_PROMPT)
-    step3_user = (
-        step3_user_tpl
-        .replace("<RESUME>", resume_text)
-        .replace("<TAILORING_PLAN>", tailoring_plan)
-    )
-    tailored_resume_mid = call_openai_with_logging(
-        [
-            {"role": "system", "content": read_text_file(TAILORING_PROMPT)},
-            {"role": "user",   "content": step3_user               }
-        ],
-        purpose="step3_apply_tailoring"
-    )
-    logger.info("Step 3 completed: intermediate tailored resume obtained.")
-    return tailored_resume_mid
+def apply_tailoring(plan: str) -> str:
+    resume_text = load_text(RESUME_FILE)
+    sys_template = load_text(STEP3_SYS)
+    user_template = load_text(STEP3_USR).replace(
+        "<INTEGRATION_PLAN>", plan).replace("<RESUME>", resume_text)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "apply_tailoring")
 
-# --------------------------------------------------
-# 9) Step 4: Update skills section in tailored resume
-# --------------------------------------------------
-def update_skills_section(tailored_resume_mid: str) -> str:
-    step4_system = read_text_file(STEP4_SYSTEM_PROMPT)
-    step4_user_tpl = read_text_file(STEP4_USER_PROMPT)
-    step4_user = step4_user_tpl.replace("<TAILORED_RESUME>", tailored_resume_mid)
 
-    final_resume = call_openai_with_logging(
-        [
-            {"role": "system", "content": step4_system},
-            {"role": "user",   "content": step4_user  }
-        ],
-        purpose="step4_update_skills"
-    )
-    logger.info("Step 4 completed: final tailored resume obtained.")
-    return final_resume
+def quantify_metrics(draft: str) -> str:
+    sys_template = load_text(STEP4_SYS)
+    user_template = load_text(STEP4_USR).replace("<TAILORED_RESUME>", draft)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "quantify_metrics")
 
-# --------------------------------------------------
-# 10) Step 5: Compute similarity score & generate report
-# --------------------------------------------------
-def compute_similarity_score(final_resume: str) -> float:
-    job_description = read_text_file(JD_PATH)
-    logger.info("Computing embedding for Job Description...")
-    jd_embed = client.embeddings.create(
-        model="text-embedding-ada-002", input=job_description
-    ).data[0].embedding
 
-    logger.info("Computing embedding for Final Tailored Resume...")
-    resume_embed = client.embeddings.create(
-        model="text-embedding-ada-002", input=final_resume
-    ).data[0].embedding
+def remove_fillers(draft: str) -> str:
+    sys_template = load_text(STEP5_SYS)
+    user_template = load_text(STEP5_USR).replace("<TAILORED_RESUME>", draft)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "remove_fillers")
 
-    score = cosine_similarity(jd_embed, resume_embed)
-    logger.debug(f"Similarity score: {score:.4f}")
-    return score
 
-# def create_report(ranked_keywords: str, tailoring_plan: str, final_resume: str, similarity_score: float) -> None:
-def create_report(ranked_keywords: str) -> None:
-    """
-    Combine Steps 1, 2, 4, and the similarity score into one Markdown report.
-    """
-    # similarity_pct = round(similarity_score * 100, 2)
-    report_lines = [
-        "# Step 1: Ranked Keywords\n\n",
-        ranked_keywords + "\n\n",
+def refine_resume(draft: str) -> str:
+    sys_template = load_text(STEP6_SYS)
+    user_template = load_text(STEP6_USR).replace("<TAILORED_RESUME>", draft)
+    return call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "refine_resume")
 
-    ]
-    
-    """
-            "# Step 2: Tailoring Plan\n\n",
-        tailoring_plan + "\n\n",
-        "# Step 4: Final Tailored Resume\n\n",
-        final_resume + "\n\n",
-        "# Step 5: Similarity Score\n\n",
-        f"Cosine similarity (JD ↔ Tailored Resume): {similarity_score:.4f} (~{similarity_pct}%)\n"
-    """
-    REPORT_PATH.write_text("".join(report_lines), encoding="utf-8")
-    logger.info(f"Report written to {REPORT_PATH}.")
 
-# --------------------------------------------------
-# 11) Step 6: Convert final resume to JSON
-# --------------------------------------------------
-def convert_resume_to_json(final_resume: str) -> None:
-    convert_user_tpl = read_text_file(CONVERT_USER_PROMPT)
-    convert_user = convert_user_tpl.replace("<FINAL_TAILORED_RESUME>", final_resume)
-
-    resume_body_json_text = call_openai_with_logging(
-        [
-            {"role": "system", "content": "You are a strict JSON‐only assistant. Output exactly one JSON blob."},
-            {"role": "user",   "content": convert_user                               }
-        ],
-        purpose="step6_convert_to_json"
-    )
-
-    # Strip away any Markdown fences or quote wrappers
-    cleaned = resume_body_json_text.strip()
+def convert_to_json(resume_md: str) -> dict:
+    sys_template = load_text(STEP7_SYS)
+    user_template = load_text(STEP7_USR).replace(
+        "<TAILORED_RESUME>", resume_md)
+    response = call_openai([
+        {"role": "system", "content": sys_template},
+        {"role": "user",   "content": user_template}
+    ], "convert_to_json")
+    cleaned = response.strip()
+    # Remove markdown fences or extraneous quotes
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
         if lines[0].startswith("```"):
@@ -275,122 +168,95 @@ def convert_resume_to_json(final_resume: str) -> None:
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         cleaned = "\n".join(lines).strip()
-    if cleaned.startswith('"""') and cleaned.endswith('"""'):
-        cleaned = cleaned[3:-3].strip()
-    if cleaned.startswith('"') and cleaned.endswith('"'):
-        cleaned = cleaned[1:-1]
-
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("''") and cleaned.endswith("''")):
+        cleaned = cleaned.strip('"')
     try:
-        resume_body = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        logger.error(
-            "Failed to parse JSON for resume conversion: %s\nRaw output:\n%s",
-            e,
-            resume_body_json_text,
-        )
+        logger.error(f"JSON parse failed: {e}\nRaw: {response}")
         raise
 
-    if not HEADER_DATA_PATH.exists():
-        logger.error(f"Header data file not found: {HEADER_DATA_PATH}")
-        raise FileNotFoundError(f"File not found: {HEADER_DATA_PATH}")
-    HEADER_DATA = json.loads(HEADER_DATA_PATH.read_text(encoding="utf-8"))
-    
-    full_resume_json = {"header": HEADER_DATA, **resume_body}
-    FINAL_RESUME_JSON_PATH.write_text(json.dumps(full_resume_json, indent=2), encoding="utf-8")
-    logger.info(f"JSON resume written to {FINAL_RESUME_JSON_PATH}.")
 
-# --------------------------------------------------
-# 12) Step 7: Generate DOCX copies
-# --------------------------------------------------
-def generate_docx_files(company: str, position: str, jobid: str) -> None:
-    """
-    Create two DOCX files:
-      1. Named {company}_{position}_{jobid}.docx under resumes/
-      2. Fixed name 'praneeth_ravuri_resume.docx' in the user's Downloads folder
-    """
-    # Load JSON résumé from disk
-    resume_json_data = json.loads(FINAL_RESUME_JSON_PATH.read_text(encoding="utf-8"))
+# DOCX generation
 
-    def _sanitize(text: str) -> str:
-        return "_".join(text.strip().split()).replace("/", "_")
 
-    company_clean  = _sanitize(company)
-    position_clean = _sanitize(position)
-    jobid_clean    = _sanitize(jobid) if jobid.strip() else ""
+def generate_docs(full_resume: dict, company: str, position: str, job_id: str):
+    def sanitize(name: str) -> str:
+        return "_".join(name.split()).replace("/", "_")
 
-    if jobid_clean:
-        filename1 = f"{company_clean}_{position_clean}_{jobid_clean}.docx"
-    else:
-        filename1 = f"{company_clean}_{position_clean}.docx"
+    comp = sanitize(company)
+    pos = sanitize(position)
+    jid = sanitize(job_id) if job_id else ""
+    filename = f"{comp}_{pos}_{jid}.docx" if jid else f"{comp}_{pos}.docx"
+    output1 = RESUMES / filename
+    generate_docx_from_json(full_resume, output_path=str(output1))
+    # Copy to Downloads
+    dl = Path.home() / "Downloads"
+    dl.mkdir(exist_ok=True)
+    generate_docx_from_json(full_resume, output_path=str(
+        dl / "praneeth_ravuri_resume.docx"))
+    logger.info(f"Generated DOCX: {output1}")
 
-    # 1st copy: saved under resumes/
-    output_path1 = RESUMES_DIR / filename1
-    create_docx_from_json(resume_json_data, output_path=str(output_path1))
-    logger.info(f"Generated DOCX: {output_path1}")
+# Full pipeline
 
-    # 2nd copy: saved in Downloads folder
-    downloads_dir = Path.home() / "Downloads"
-    downloads_dir.mkdir(exist_ok=True)
-    output_path2 = downloads_dir / "praneeth_ravuri_resume.docx"
-    create_docx_from_json(resume_json_data, output_path=str(output_path2))
-    logger.info(f"Generated DOCX copy in Downloads: {output_path2}")
 
-# --------------------------------------------------
-# 13) Full pipeline orchestration
-# --------------------------------------------------
-def run_pipeline(company: str, position: str, jobid: str):
-    # --- Pre-cleanup: clear results/ and job_description.txt ---
-    if RESULTS_DIR.exists():
-        shutil.rmtree(RESULTS_DIR)
-    RESULTS_DIR.mkdir(exist_ok=True)
+def run_pipeline(company: str, position: str, job_id: str):
+    # Cleanup and ensure directories
+    if RESULTS.exists():
+        shutil.rmtree(RESULTS)
+    RESULTS.mkdir(exist_ok=True)
 
-    # Step 1: Extract & rank keywords
-    ranked_keywords = analyze_jd()
+    # Stage 1: extract keywords
+    keywords = extract_keywords()
+    # Stage 2: generate integration plan
+    plan = plan_keywords(keywords)
+    # Stage 3: apply tailoring
+    draft1 = apply_tailoring(plan)
+    # Stage 4: quantify metrics
+    draft2 = quantify_metrics(draft1)
+    # Stage 5: remove fillers
+    draft3 = remove_fillers(draft2)
+    # Stage 6: refine resume
+    refined_md = refine_resume(draft3)
+    # Stage 7: convert to JSON (body only)
+    body_json = convert_to_json(refined_md)
 
-    """
-    # Step 2: Plan keyword insertion
-    tailoring_plan = keyword_insertion_plan(ranked_keywords)
+    # Load header and merge
+    header_json = json.loads(load_text(HEADER_FILE))
+    full_json = {
+        "header": header_json,
+        **body_json
+    }
 
-    # Step 3: Apply tailoring plan
-    tailored_resume_mid = apply_tailoring_plan(tailoring_plan)
+    # Write final JSON
+    final_json_path = RESULTS / "final_resume.json"
+    final_json_path.write_text(json.dumps(
+        full_json, indent=2), encoding="utf-8")
 
-    # Step 4: Update skills section
-    final_resume = update_skills_section(tailored_resume_mid)
+    # Generate DOCX files using merged JSON
+    generate_docs(full_json, company, position, job_id)
 
-    # Write final resume Markdown to results/
-    TAILORED_RESUME_PATH.write_text(final_resume, encoding="utf-8")
-    logger.info(f"Final tailored resume written to {TAILORED_RESUME_PATH}")
+    # Create a combined report
+    report_path = RESULTS / "report.md"
+    with report_path.open("w", encoding="utf-8") as report:
+        report.write(f"# Step 1: Keywords\n\n{keywords}\n\n")
+        report.write(f"# Step 2: Plan\n\n{plan}\n\n")
+        report.write(f"# Step 3: Draft\n\n{draft1}\n\n")
+        report.write(f"# Step 4: Quantified\n\n{draft2}\n\n")
+        report.write(f"# Step 5: Cleaned\n\n{draft3}\n\n")
+        report.write(f"# Step 6: Refined\n\n{refined_md}\n")
 
-    # Step 5: Compute similarity and create report
-    similarity_score = compute_similarity_score(final_resume)
-    create_report(ranked_keywords, tailoring_plan, final_resume, similarity_score)
-
-    # Step 6: Convert to JSON
-    convert_resume_to_json(final_resume)
-
-    # Step 7: Generate DOCX files
-    generate_docx_files(company, position, jobid)
-"""
-    create_report(ranked_keywords=ranked_keywords)
-    # Finally, clear job_description.txt again
-    # if JD_PATH.exists():
-    #     JD_PATH.write_text("", encoding="utf-8")
-
-    print("✅ All steps completed. See logs in 'logs/resume_tailoring.log' for details.")
+    print("Pipeline completed successfully.")
 
 
 if __name__ == "__main__":
-    # Load environment variables (expects OPENAI_API_KEY set)
     load_dotenv()
     client = OpenAI()
-
-    print("Please enter the following details for naming the resume files.")
     company = input("Company Name: ").strip()
-    position = input("Position Name: ").strip()
-    jobid = input("Job ID (optional; press Enter to skip): ").strip()
-
+    position = input("Position: ").strip()
+    job_id = input("Job ID (optional): ").strip()
     try:
-        run_pipeline(company, position, jobid)
+        run_pipeline(company, position, job_id)
     except Exception as e:
-        logger.error("Pipeline terminated with an error: %s", e, exc_info=True)
-        print(f"❌ Pipeline failed: {e}")
+        logger.error(f"Pipeline error: {e}", exc_info=True)
+        print(f"Error: {e}")

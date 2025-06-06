@@ -40,9 +40,3 @@ project entry:
 **IMPORTANT**:
 - Output exactly one JSON blob—no extra text, no markdown fences, no comments.
 - The JSON must start with '{' and end with '}' and be valid.
-
-Here is the final tailored resume text (excluding header):
-
---------------------------
-<FINAL_TAILORED_RESUME>
---------------------------
