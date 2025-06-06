@@ -1,3 +1,4 @@
+# ========== main.py (Refactored with Cost Tracking) ==========
 from create_resume_docx import generate_docx_from_json
 from usage import estimate_tokens_and_price
 import json
@@ -5,8 +6,9 @@ import shutil
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
+import sys
 
-# Paths
+# Define file paths
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
 PROMPTS = ROOT / "prompts"
@@ -37,15 +39,57 @@ STEP5_USR = USR_P / "step5_user.md"
 STEP6_USR = USR_P / "step6_user.md"
 STEP7_USR = USR_P / "step7_user.md"
 
-client = None  # Initialized after loading env vars
+# Output files
+REPORT = RESULTS / "report.md"
+TAILORED_RESUME = RESULTS / "tailored_resume.json"
 
-# Helpers
+# OpenAI client placeholder
+client = None  # Will be initialized after loading environment variables
+
+# Global accumulators for token & cost tracking
+total_tokens_in = 0
+total_cost_in = 0.0
+total_tokens_out = 0
+total_cost_out = 0.0
+
+# --------- Helper Functions ---------
+
 def load_text(path: Path) -> str:
+    """
+    Load text content from a given file path.
+
+    Args:
+        path (Path): Path to the text file.
+
+    Returns:
+        str: The content of the file.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        RuntimeError: If reading the file fails.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise RuntimeError(f"Error reading file {path}: {e}")
+
 
 def call_openai(messages: list, purpose: str) -> str:
+    """
+    Call the OpenAI ChatCompletion API with the given messages.
+
+    Args:
+        messages (list): List of message dicts for the API.
+        purpose (str): A label for error context.
+
+    Returns:
+        str: The content of the API response.
+
+    Raises:
+        RuntimeError: If the API call fails.
+    """
     try:
         resp = client.chat.completions.create(
             model="gpt-4o", messages=messages, temperature=0.3
@@ -54,18 +98,46 @@ def call_openai(messages: list, purpose: str) -> str:
         return content
     except Exception as e:
         raise RuntimeError(f"[{purpose}] OpenAI call failed: {e}")
+    
+def write_to_report(response: str):
+    """
+    Write the response content to the report file.
 
-# Pipeline steps (with token counting)
-def extract_keywords(metrics: dict) -> str:
+    Args:
+        response (str): The content to write to the report.
+    """
+    try:
+        with REPORT.open("a", encoding="utf-8") as report_file:
+            report_file.write(response + "\n\n")
+    except Exception as e:
+        raise RuntimeError(f"Error writing to report: {e}")
+
+def print_metrics(tokens_in: int, cost_in: float, tokens_out: int, cost_out: float):
+    """
+    Print token usage and cost for a stage.
+    """
+    print(f"Input Tokens: {tokens_in}, Cost: ${cost_in:.6f}")
+    print(f"Output Tokens: {tokens_out}, Cost: ${cost_out:.6f}\n")
+
+# --------- Pipeline Steps ---------
+
+def extract_keywords() -> str:
+    """
+    Stage 1: Extract prioritized keywords from the job description.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     jd_text = load_text(JD_FILE)
     sys_template = load_text(STEP1_SYS)
     user_template = load_text(STEP1_USR).replace("<JOB_DESCRIPTION>", jd_text)
 
-    # Count input tokens for step 1
+    # Count input tokens and cost for Stage 1
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step1_in_tokens"] = tokens_in
-    metrics["step1_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -74,24 +146,40 @@ def extract_keywords(metrics: dict) -> str:
         "extract_keywords",
     )
 
-    # Count output tokens for step 1
+    # Count output tokens and cost for Stage 1
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step1_out_tokens"] = tokens_out
-    metrics["step1_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 1: extract_keywords")
+    # Print summary for Stage 1
+    print("\nStage 1 Complete: Keywords extracted.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 1: Extract Keywords\n" + response)
+
     return response
 
-def plan_keywords(metrics: dict, keywords: str) -> str:
+
+def plan_keywords(keywords: str) -> str:
+    """
+    Stage 2: Generate integration plan mapping keywords to resume.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     resume_text = load_text(RESUME_FILE)
     sys_template = load_text(STEP2_SYS)
-    user_template = load_text(STEP2_USR).replace("<RESUME>", resume_text).replace("<RANKED_KEYWORDS>", keywords)
+    user_template = (
+        load_text(STEP2_USR)
+        .replace("<RESUME>", resume_text)
+        .replace("<RANKED_KEYWORDS>", keywords)
+    )
 
-    # Count input tokens for step 2
+    # Count input tokens and cost for Stage 2
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step2_in_tokens"] = tokens_in
-    metrics["step2_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -100,24 +188,40 @@ def plan_keywords(metrics: dict, keywords: str) -> str:
         "plan_keywords",
     )
 
-    # Count output tokens for step 2
+    # Count output tokens and cost for Stage 2
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step2_out_tokens"] = tokens_out
-    metrics["step2_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 2: plan_keywords")
+    # Print summary for Stage 2
+    print("\nStage 2 Complete: Integration plan generated.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 2: Keyword Integration Plan\n" + response)
+
     return response
 
-def apply_tailoring(metrics: dict, plan: str) -> str:
+
+def apply_tailoring(plan: str) -> str:
+    """
+    Stage 3: Apply the integration plan to the resume.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     resume_text = load_text(RESUME_FILE)
     sys_template = load_text(STEP3_SYS)
-    user_template = load_text(STEP3_USR).replace("<INTEGRATION_PLAN>", plan).replace("<RESUME>", resume_text)
+    user_template = (
+        load_text(STEP3_USR)
+        .replace("<INTEGRATION_PLAN>", plan)
+        .replace("<RESUME>", resume_text)
+    )
 
-    # Count input tokens for step 3
+    # Count input tokens and cost for Stage 3
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step3_in_tokens"] = tokens_in
-    metrics["step3_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -126,23 +230,35 @@ def apply_tailoring(metrics: dict, plan: str) -> str:
         "apply_tailoring",
     )
 
-    # Count output tokens for step 3
+    # Count output tokens and cost for Stage 3
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step3_out_tokens"] = tokens_out
-    metrics["step3_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 3: apply_tailoring")
+    # Print summary for Stage 3
+    print("\nStage 3 Complete: Tailored resume draft generated.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 3: Tailored Resume Draft\n" + response)
+
     return response
 
-def quantify_metrics(metrics: dict, draft: str) -> str:
+
+def quantify_metrics(draft: str) -> str:
+    """
+    Stage 4: Ensure every bullet has quantifiable metrics.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     sys_template = load_text(STEP4_SYS)
     user_template = load_text(STEP4_USR).replace("<TAILORED_RESUME>", draft)
 
-    # Count input tokens for step 4
+    # Count input tokens and cost for Stage 4
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step4_in_tokens"] = tokens_in
-    metrics["step4_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -151,23 +267,35 @@ def quantify_metrics(metrics: dict, draft: str) -> str:
         "quantify_metrics",
     )
 
-    # Count output tokens for step 4
+    # Count output tokens and cost for Stage 4
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step4_out_tokens"] = tokens_out
-    metrics["step4_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 4: quantify_metrics")
+    # Print summary for Stage 4
+    print("\nStage 4 Complete: Metrics quantified.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 4: Quantified Metrics\n" + response)
+
     return response
 
-def remove_fillers(metrics: dict, draft: str) -> str:
+
+def remove_fillers(draft: str) -> str:
+    """
+    Stage 5: Remove filler words, buzzwords, and jargon.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     sys_template = load_text(STEP5_SYS)
     user_template = load_text(STEP5_USR).replace("<TAILORED_RESUME>", draft)
 
-    # Count input tokens for step 5
+    # Count input tokens and cost for Stage 5
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step5_in_tokens"] = tokens_in
-    metrics["step5_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -176,23 +304,35 @@ def remove_fillers(metrics: dict, draft: str) -> str:
         "remove_fillers",
     )
 
-    # Count output tokens for step 5
+    # Count output tokens and cost for Stage 5
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step5_out_tokens"] = tokens_out
-    metrics["step5_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 5: remove_fillers")
+    # Print summary for Stage 5
+    print("\nStage 5 Complete: Fillers removed.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 5: Remove Fillers\n" + response)
+
     return response
 
-def refine_resume(metrics: dict, draft: str) -> str:
+
+def refine_resume(draft: str) -> str:
+    """
+    Stage 6: Refine resume to final, domain-aligned format.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     sys_template = load_text(STEP6_SYS)
     user_template = load_text(STEP6_USR).replace("<TAILORED_RESUME>", draft)
 
-    # Count input tokens for step 6
+    # Count input tokens and cost for Stage 6
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step6_in_tokens"] = tokens_in
-    metrics["step6_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -201,23 +341,35 @@ def refine_resume(metrics: dict, draft: str) -> str:
         "refine_resume",
     )
 
-    # Count output tokens for step 6
+    # Count output tokens and cost for Stage 6
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step6_out_tokens"] = tokens_out
-    metrics["step6_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    print("Completed Stage 6: refine_resume")
+    # Print summary for Stage 6
+    print("\nStage 6 Complete: Resume refined.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 6: Refine Resume\n" + response)
+
     return response
 
-def convert_to_json(metrics: dict, resume_md: str) -> dict:
+
+def convert_to_json(resume_md: str) -> dict:
+    """
+    Stage 7: Convert final markdown resume to JSON structure.
+    Updates global accumulators with token usage and cost.
+    """
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
+
     sys_template = load_text(STEP7_SYS)
     user_template = load_text(STEP7_USR).replace("<TAILORED_RESUME>", resume_md)
 
-    # Count input tokens for step 7
+    # Count input tokens and cost for Stage 7
     tokens_in, cost_in = estimate_tokens_and_price(sys_template + user_template, "input")
-    metrics["step7_in_tokens"] = tokens_in
-    metrics["step7_in_cost"] = cost_in
+    total_tokens_in += tokens_in
+    total_cost_in += cost_in
 
+    # API call
     response = call_openai(
         [
             {"role": "system", "content": sys_template},
@@ -226,12 +378,12 @@ def convert_to_json(metrics: dict, resume_md: str) -> dict:
         "convert_to_json",
     )
 
-    # Count output tokens for step 7
+    # Count output tokens and cost for Stage 7
     tokens_out, cost_out = estimate_tokens_and_price(response, "output")
-    metrics["step7_out_tokens"] = tokens_out
-    metrics["step7_out_cost"] = cost_out
+    total_tokens_out += tokens_out
+    total_cost_out += cost_out
 
-    # Clean up JSON fences if present
+    # Clean JSON fences if present
     cleaned = response.strip()
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
@@ -248,11 +400,19 @@ def convert_to_json(metrics: dict, resume_md: str) -> dict:
     except json.JSONDecodeError as e:
         raise RuntimeError(f"JSON parse failed: {e}\nRaw: {response}")
 
-    print("Completed Stage 7: convert_to_json")
+    # Print summary for Stage 7
+    print("\nStage 7 Complete: JSON conversion done.")
+    print_metrics(tokens_in, cost_in, tokens_out, cost_out)
+    write_to_report("## Stage 7: Convert to JSON\n" + response)
+
     return result
 
-# DOCX generation
+# --------- DOCX Generation ---------
+
 def generate_docs(full_resume: dict, company: str, position: str, job_id: str):
+    """
+    Generate DOCX files for the final resume and copy to Downloads.
+    """
     def sanitize(name: str) -> str:
         return "_".join(name.split()).replace("/", "_")
 
@@ -261,6 +421,7 @@ def generate_docs(full_resume: dict, company: str, position: str, job_id: str):
     jid = sanitize(job_id) if job_id else ""
     filename = f"{comp}_{pos}_{jid}.docx" if jid else f"{comp}_{pos}.docx"
     output1 = RESUMES / filename
+
     generate_docx_from_json(full_resume, output_path=str(output1))
 
     # Copy to Downloads
@@ -268,121 +429,75 @@ def generate_docs(full_resume: dict, company: str, position: str, job_id: str):
     dl.mkdir(exist_ok=True)
     generate_docx_from_json(full_resume, output_path=str(dl / "praneeth_ravuri_resume.docx"))
 
-    print(f"Generated DOCX at: {output1}")
+    print(f"Generated DOCX at: {output1}\n")
 
-# Full pipeline
+# --------- Full Pipeline ---------
+
 def run_pipeline(company: str, position: str, job_id: str):
-    metrics = {}
-    totals = {
-        "in_tokens": 0,
-        "out_tokens": 0,
-        "in_cost": 0.0,
-        "out_cost": 0.0,
-    }
+    global total_tokens_in, total_cost_in, total_tokens_out, total_cost_out
 
-    # Cleanup and ensure directories
-    if RESULTS.exists():
-        shutil.rmtree(RESULTS)
-    RESULTS.mkdir(exist_ok=True)
+    # Ensure results directory is clean
+    try:
+        if RESULTS.exists():
+            shutil.rmtree(RESULTS)
+        RESULTS.mkdir(exist_ok=True)
+    except Exception as e:
+        print(f"Error preparing results directory: {e}")
+        sys.exit(1)
 
-    # Stage 1: extract keywords
-    keywords = extract_keywords(metrics)
-    totals["in_tokens"] += metrics["step1_in_tokens"]
-    totals["in_cost"] += metrics["step1_in_cost"]
-    totals["out_tokens"] += metrics["step1_out_tokens"]
-    totals["out_cost"] += metrics["step1_out_cost"]
+    # Stage executions with error handling
+    try:
+        keywords = extract_keywords()
+        plan = plan_keywords(keywords)
+        draft1 = apply_tailoring(plan)
+        draft2 = quantify_metrics(draft1)
+        draft3 = remove_fillers(draft2)
+        refined_md = refine_resume(draft3)
+        body_json = convert_to_json(refined_md)
+    except Exception as e:
+        print(f"Pipeline failed during execution: {e}")
+        sys.exit(1)
 
-    # Stage 2: generate integration plan
-    plan = plan_keywords(metrics, keywords)
-    totals["in_tokens"] += metrics["step2_in_tokens"]
-    totals["in_cost"] += metrics["step2_in_cost"]
-    totals["out_tokens"] += metrics["step2_out_tokens"]
-    totals["out_cost"] += metrics["step2_out_cost"]
+    # Merge header JSON and final resume
+    try:
+        header_json = json.loads(load_text(HEADER_FILE))
+        full_json = {"header": header_json, **body_json}
 
-    # Stage 3: apply tailoring
-    draft1 = apply_tailoring(metrics, plan)
-    totals["in_tokens"] += metrics["step3_in_tokens"]
-    totals["in_cost"] += metrics["step3_in_cost"]
-    totals["out_tokens"] += metrics["step3_out_tokens"]
-    totals["out_cost"] += metrics["step3_out_cost"]
+        # Write final JSON
+        final_json_path = TAILORED_RESUME
+        final_json_path.write_text(json.dumps(full_json, indent=2), encoding="utf-8")
 
-    # Stage 4: quantify metrics
-    draft2 = quantify_metrics(metrics, draft1)
-    totals["in_tokens"] += metrics["step4_in_tokens"]
-    totals["in_cost"] += metrics["step4_in_cost"]
-    totals["out_tokens"] += metrics["step4_out_tokens"]
-    totals["out_cost"] += metrics["step4_out_cost"]
+        # Append total cost summary to report
+        cost_summary = (
+            "## Total Token Usage & Cost Summary\n"
+            f"- Total Input Tokens: {total_tokens_in}, Total Input Cost: ${total_cost_in:.6f}\n"
+            f"- Total Output Tokens: {total_tokens_out}, Total Output Cost: ${total_cost_out:.6f}\n"
+        )
+        write_to_report(cost_summary)
 
-    # Stage 5: remove fillers
-    draft3 = remove_fillers(metrics, draft2)
-    totals["in_tokens"] += metrics["step5_in_tokens"]
-    totals["in_cost"] += metrics["step5_in_cost"]
-    totals["out_tokens"] += metrics["step5_out_tokens"]
-    totals["out_cost"] += metrics["step5_out_cost"]
+    except Exception as e:
+        print(f"Error generating final JSON: {e}")
+        sys.exit(1)
 
-    # Stage 6: refine resume
-    refined_md = refine_resume(metrics, draft3)
-    totals["in_tokens"] += metrics["step6_in_tokens"]
-    totals["in_cost"] += metrics["step6_in_cost"]
-    totals["out_tokens"] += metrics["step6_out_tokens"]
-    totals["out_cost"] += metrics["step6_out_cost"]
-
-    # Stage 7: convert to JSON (body only)
-    body_json = convert_to_json(metrics, refined_md)
-    totals["in_tokens"] += metrics["step7_in_tokens"]
-    totals["in_cost"] += metrics["step7_in_cost"]
-    totals["out_tokens"] += metrics["step7_out_tokens"]
-    totals["out_cost"] += metrics["step7_out_cost"]
-
-    # Load header and merge
-    header_json = json.loads(load_text(HEADER_FILE))
-    full_json = {
-        "header": header_json,
-        **body_json
-    }
-
-    # Write final JSON
-    final_json_path = RESULTS / "final_resume.json"
-    final_json_path.write_text(json.dumps(full_json, indent=2), encoding="utf-8")
-
-    # Generate DOCX files using merged JSON
+    # Generate DOCX files
     generate_docs(full_json, company, position, job_id)
 
-    # Create a combined report with token metrics
-    report_path = RESULTS / "report.md"
-    with report_path.open("w", encoding="utf-8") as report:
-        report.write(f"# Step 1: Keywords\n\n{keywords}\n\n")
-        report.write(f"# Step 2: Plan\n\n{plan}\n\n")
-        report.write(f"# Step 3: Draft\n\n{draft1}\n\n")
-        report.write(f"# Step 4: Quantified\n\n{draft2}\n\n")
-        report.write(f"# Step 5: Cleaned\n\n{draft3}\n\n")
-        report.write(f"# Step 6: Refined\n\n{refined_md}\n\n")
-
-        # Token usage summary
-        report.write("## Token Usage and Costs\n\n")
-        for step in range(1, 8):
-            in_t = metrics[f"step{step}_in_tokens"]
-            out_t = metrics[f"step{step}_out_tokens"]
-            in_c = metrics[f"step{step}_in_cost"]
-            out_c = metrics[f"step{step}_out_cost"]
-            report.write(f"- Step {step} Input: {in_t} tokens, ${in_c:.6f}\n")
-            report.write(f"- Step {step} Output: {out_t} tokens, ${out_c:.6f}\n\n")
-
-        total_cost = totals["in_cost"] + totals["out_cost"]
-        report.write(f"**Total Input Tokens:** {totals['in_tokens']}  \n")
-        report.write(f"**Total Output Tokens:** {totals['out_tokens']}  \n")
-        report.write(f"**Total Cost:** ${total_cost:.6f}\n")
-
-    print(f"Pipeline completed successfully. Total cost: ${total_cost:.6f}")
+# --------- Entry Point ---------
 
 if __name__ == "__main__":
     load_dotenv()
-    client = OpenAI()
+    try:
+        client = OpenAI()
+    except Exception as e:
+        print(f"Error initializing OpenAI client: {e}")
+        sys.exit(1)
+
     company = input("Company Name: ").strip()
     position = input("Position: ").strip()
     job_id = input("Job ID (optional): ").strip()
-    try:
-        run_pipeline(company, position, job_id)
-    except Exception as e:
-        raise RuntimeError(f"Pipeline failed: {e}") from e
-        
+
+    if not company or not position:
+        print("Company and Position are required.")
+        sys.exit(1)
+
+    run_pipeline(company, position, job_id)
